@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wario — 异步 Code Review</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 text-gray-900 font-sans">
+  <div class="max-w-5xl mx-auto px-4 py-8">
+    <header class="flex items-center justify-between mb-8">
+      <div>
+        <h1 class="text-2xl font-bold tracking-tight">
+          Wario
+          <span class="text-xs text-gray-400 font-normal ml-2">异步 Code Review</span>
+        </h1>
+        <p class="text-sm text-gray-500 mt-0.5">不客气地指出问题，不留情面地暴露风险</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <label for="project" class="text-sm text-gray-600">Project:</label>
+        <select id="project" class="border border-gray-300 rounded px-2 py-1 text-sm bg-white">
+          <option value="">加载中…</option>
+        </select>
+        <button id="refresh" class="text-xs text-gray-500 hover:text-gray-700 ml-2" title="手动刷新">↻</button>
+      </div>
+    </header>
+
+    <main id="main">
+      <p class="text-sm text-gray-500 italic">加载中…</p>
+    </main>
+
+    <footer class="mt-12 text-center text-xs text-gray-400">
+      <a href="/api/health" class="hover:text-gray-600">/api/health</a>
+      ·
+      <span>bind <code class="font-mono">127.0.0.1:7331</code></span>
+    </footer>
+  </div>
+
+  <script>
+    const projectSelect = document.getElementById('project');
+    const refreshBtn = document.getElementById('refresh');
+    const main = document.getElementById('main');
+
+    function fmtAge(iso) {
+      const t = new Date(iso).getTime();
+      if (isNaN(t)) return '?';
+      const ageMs = Date.now() - t;
+      const m = Math.floor(ageMs / 60000);
+      if (m < 1) return '刚刚';
+      if (m < 60) return `${m} 分钟前`;
+      const h = Math.floor(m / 60);
+      if (h < 24) return `${h} 小时前`;
+      return `${Math.floor(h / 24)} 天前`;
+    }
+
+    function shortId(id, n = 8) {
+      if (!id) return '';
+      return id.length > n ? id.slice(0, n) : id;
+    }
+
+    function riskClass(r) {
+      if (r === 'L1') return 'bg-green-100 text-green-700';
+      if (r === 'L2') return 'bg-amber-100 text-amber-700';
+      if (r === 'L3') return 'bg-red-100 text-red-700';
+      return 'bg-gray-100 text-gray-600';
+    }
+
+    function verdictClass(v) {
+      if (v === 'approve') return 'text-green-700';
+      if (v === 'reject') return 'text-red-700';
+      return 'text-gray-600';
+    }
+
+    function severityClass(s) {
+      if (s === 'critical' || s === 'high') return 'bg-red-100 text-red-700';
+      if (s === 'medium') return 'bg-amber-100 text-amber-700';
+      return 'bg-gray-100 text-gray-600';
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function renderResumeRounds(rounds) {
+      if (!rounds || rounds.length === 0) return '';
+      const items = rounds.map(r => `
+        <div class="text-sm mt-2 border-t border-purple-100 pt-2">
+          <div class="text-gray-700"><span class="text-purple-700 font-semibold">Q:</span> ${escapeHtml(r.question)}</div>
+          <div class="text-gray-800 mt-0.5 whitespace-pre-wrap"><span class="text-purple-700 font-semibold">A:</span> ${escapeHtml(r.answer)}</div>
+          ${r.findings && r.findings.length ? r.findings.map(f => `
+            <div class="text-xs mt-1 ml-4 flex gap-2 items-start">
+              <span class="inline-block text-xs px-1.5 py-0.5 rounded ${severityClass(f.severity)} shrink-0">${escapeHtml(f.severity)}</span>
+              <span class="flex-1"><span class="text-gray-500">${escapeHtml(f.category)}</span> <span class="text-gray-800">${escapeHtml(f.description)}</span></span>
+            </div>
+          `).join('') : ''}
+        </div>
+      `).join('');
+      return `<div class="mt-2">${items}</div>`;
+    }
+
+    function renderPreReview(pr) {
+      if (!pr) return '';
+      const findings = (pr.findings || []).map(f => `
+        <div class="text-sm mt-1 flex gap-2 items-start">
+          <span class="inline-block text-xs px-1.5 py-0.5 rounded ${severityClass(f.severity)} shrink-0">${escapeHtml(f.severity)}</span>
+          <span class="flex-1">
+            <span class="text-gray-500">${escapeHtml(f.category)}</span>${f.location ? ` <span class="text-gray-400 font-mono text-xs">${escapeHtml(f.location)}</span>` : ''}
+            <span class="block text-gray-800">${escapeHtml(f.description)}</span>
+            ${f.suggestion ? `<span class="block text-gray-500 italic mt-0.5">→ ${escapeHtml(f.suggestion)}</span>` : ''}
+          </span>
+        </div>
+      `).join('');
+      const sessionInfo = pr.reviewSessionId
+        ? `<span class="text-xs text-gray-400 font-mono">session: ${escapeHtml(shortId(pr.reviewSessionId, 12))}</span>`
+        : '';
+      return `
+        <details class="mt-2 bg-purple-50 border border-purple-100 rounded p-2" open>
+          <summary class="text-xs text-purple-700 cursor-pointer">
+            <span class="font-semibold">Review Agent</span>
+            <span class="font-mono">${escapeHtml(pr.byAgent)}</span>
+            · risk <span class="px-1 rounded ${riskClass(pr.riskLevel)}">${escapeHtml(pr.riskLevel)}</span>
+            <span class="text-gray-600"> — ${escapeHtml(pr.summary)}</span>
+            ${sessionInfo}
+          </summary>
+          <div class="mt-2 space-y-1">${findings || '<p class="text-xs text-gray-500 italic">no findings</p>'}</div>
+          ${renderResumeRounds(pr.resumeRounds)}
+        </details>
+      `;
+    }
+
+    function renderReview(r, isPending) {
+      const risk = r.selfAssessedRisk ?? '—';
+      const tags = (r.context.tags || [])
+        .map(t => `<span class="inline-block bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded mr-1">${escapeHtml(t)}</span>`)
+        .join('');
+      const contentTypeBadge = r.contentType
+        ? `<span class="text-xs text-gray-500 bg-gray-50 px-1.5 py-0.5 rounded">${escapeHtml(r.contentType)}</span>`
+        : '';
+      const commentInput = isPending
+        ? `<input type="text" data-comment-for="${escapeHtml(r.id)}" placeholder="(可选) 评审意见" class="border border-gray-300 rounded px-2 py-1 text-sm w-48" />`
+        : '';
+      const resumeBtn = isPending && r.preReview
+        ? `<button data-action="resume" data-id="${escapeHtml(r.id)}" class="text-xs text-purple-700 hover:text-purple-900 border border-purple-300 hover:border-purple-500 px-2 py-1 rounded">追问 Reviewer</button>`
+        : '';
+      const actions = isPending
+        ? `<div class="flex flex-col gap-1 items-end">${resumeBtn}<div class="flex gap-2 items-center">${commentInput}<button data-action="approve" data-id="${escapeHtml(r.id)}" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm">Approve</button><button data-action="reject" data-id="${escapeHtml(r.id)}" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm">Reject</button></div></div>`
+        : `<span class="text-xs ${verdictClass(r.decision.verdict)}">${escapeHtml(r.decision.verdict)} by ${escapeHtml(r.decision.reviewer)} · ${fmtAge(r.decidedAt)}</span>`;
+
+      const decisionComment = !isPending && r.decision.comment
+        ? `<p class="text-sm text-gray-700 mt-1 italic">"${escapeHtml(r.decision.comment)}"</p>`
+        : '';
+
+      const sourceLabel = r.context.source
+        ? `<span class="text-xs text-gray-400">· ${escapeHtml(r.context.source)}${r.context.sourceRef ? `:${escapeHtml(r.context.sourceRef)}` : ''}</span>`
+        : '';
+
+      return `
+        <div class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+          <div class="flex items-start gap-3">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-baseline gap-2 flex-wrap">
+                <code class="text-xs text-gray-400 font-mono">${escapeHtml(r.id)}</code>
+                <span class="inline-block text-xs px-1.5 py-0.5 rounded ${riskClass(risk)}">${escapeHtml(risk)}</span>
+                ${contentTypeBadge}
+                <span class="text-xs text-gray-500">${fmtAge(r.createdAt)}</span>
+                <span class="text-xs text-gray-400">· pushed by ${escapeHtml(r.pushedBy)}</span>
+                ${sourceLabel}
+              </div>
+              <h3 class="font-medium mt-1">${escapeHtml(r.context.title)}</h3>
+              ${r.context.description ? `<p class="text-sm text-gray-600 mt-1 whitespace-pre-wrap">${escapeHtml(r.context.description)}</p>` : ''}
+              ${tags ? `<div class="mt-2">${tags}</div>` : ''}
+              ${renderPreReview(r.preReview)}
+              ${decisionComment}
+            </div>
+            <div class="flex flex-col gap-2 items-end">${actions}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function groupBySession(reviews) {
+      const groups = new Map();
+      for (const r of reviews) {
+        const key = r.sessionId || `__no_session__:${r.id}`;
+        if (!groups.has(key)) groups.set(key, { sessionId: r.sessionId, items: [] });
+        groups.get(key).items.push(r);
+      }
+      const list = Array.from(groups.values());
+      list.sort((a, b) => {
+        const aT = Math.max(...a.items.map(r => new Date(r.createdAt).getTime()));
+        const bT = Math.max(...b.items.map(r => new Date(r.createdAt).getTime()));
+        return bT - aT;
+      });
+      return list;
+    }
+
+    function renderGroup(g, statusLabel) {
+      const header = g.sessionId
+        ? `<div class="flex items-baseline gap-2 mb-2">
+             <span class="text-xs uppercase tracking-wide text-purple-700 font-semibold">Session</span>
+             <code class="text-sm font-mono text-gray-700">${escapeHtml(shortId(g.sessionId, 12))}</code>
+             <span class="text-xs text-gray-400">(${g.items.length} ${g.items.length === 1 ? 'item' : 'items'})</span>
+           </div>`
+        : '';
+      const isPending = statusLabel === 'pending';
+      const itemsHtml = g.items
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .map(r => renderReview(r, isPending))
+        .join('');
+      return `<div class="mb-4">${header}<div class="space-y-3">${itemsHtml}</div></div>`;
+    }
+
+    function renderSection(title, count, reviews, statusLabel) {
+      const groups = groupBySession(reviews);
+      const empty = reviews.length === 0;
+      return `
+        <section class="mb-10">
+          <h2 class="text-lg font-semibold mb-3">
+            ${title}
+            <span class="text-gray-400 font-normal">${count ? `(${count})` : ''}</span>
+          </h2>
+          ${empty
+            ? `<p class="text-sm text-gray-500 italic">${statusLabel === 'pending' ? '队列空，等着被推。' : '还没决策过任何东西。'}</p>`
+            : groups.map(g => renderGroup(g, statusLabel)).join('')}
+        </section>
+      `;
+    }
+
+    async function loadProjects() {
+      try {
+        const res = await fetch('/api/projects');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const projects = await res.json();
+        projectSelect.innerHTML = '';
+        if (projects.length === 0) {
+          const opt = document.createElement('option');
+          opt.value = 'default';
+          opt.textContent = 'default (run `wario init`)';
+          projectSelect.appendChild(opt);
+        } else {
+          for (const p of projects) {
+            const opt = document.createElement('option');
+            opt.value = p.slug;
+            opt.textContent = `${p.name} (${p.slug})`;
+            projectSelect.appendChild(opt);
+          }
+        }
+        await loadReviews();
+      } catch (e) {
+        console.error(e);
+        projectSelect.innerHTML = '<option value="">加载失败</option>';
+      }
+    }
+
+    async function loadReviews() {
+      const slug = projectSelect.value;
+      if (!slug) return;
+      try {
+        const res = await fetch(`/api/projects/${encodeURIComponent(slug)}/reviews`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const reviews = await res.json();
+        const pending = reviews.filter(r => r.status === 'pending');
+        const decided = reviews.filter(r => r.status === 'decided');
+        main.innerHTML =
+          renderSection('Pending', pending.length, pending, 'pending') +
+          renderSection('Decided', decided.length, decided, 'decided');
+      } catch (e) {
+        console.error(e);
+        main.innerHTML = '<p class="text-sm text-red-600">加载失败</p>';
+      }
+    }
+
+    async function decide(id, verdict) {
+      const commentEl = document.querySelector(`[data-comment-for="${id}"]`);
+      const comment = commentEl && commentEl.value.trim() ? commentEl.value.trim() : undefined;
+      try {
+        const res = await fetch(`/api/reviews/${encodeURIComponent(id)}/decide`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ verdict, comment }),
+        });
+        if (!res.ok) {
+          const err = await res.text();
+          alert(`Failed: ${res.status} ${err}`);
+          return;
+        }
+        await loadReviews();
+      } catch (e) {
+        alert(`Error: ${e.message}`);
+      }
+    }
+
+    async function resume(id) {
+      const question = window.prompt(`追问 Reviewer Agent (review ${id.slice(0, 12)}…):`);
+      if (!question || !question.trim()) return;
+      try {
+        const res = await fetch(`/api/reviews/${encodeURIComponent(id)}/resume`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ question: question.trim() }),
+        });
+        if (!res.ok) {
+          const err = await res.text();
+          alert(`Failed: ${res.status} ${err}`);
+          return;
+        }
+        await loadReviews();
+      } catch (e) {
+        alert(`Error: ${e.message}`);
+      }
+    }
+
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-action]');
+      if (!btn) return;
+      if (btn.dataset.action === 'resume') {
+        resume(btn.dataset.id);
+        return;
+      }
+      decide(btn.dataset.id, btn.dataset.action);
+    });
+
+    projectSelect.addEventListener('change', loadReviews);
+    refreshBtn.addEventListener('click', loadReviews);
+
+    loadProjects();
+    setInterval(loadReviews, 5000);
+  </script>
+</body>
+</html>

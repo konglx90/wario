@@ -1,0 +1,33 @@
+{
+  "name": "wario",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Async Code Review inbox — decouple review from agent workflow",
+  "bin": {
+    "wario": "./bin/wario.js"
+  },
+  "scripts": {
+    "build": "tsc && mkdir -p dist && cp -R src/public dist/public",
+    "serve": "node bin/wario.js serve",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "commander": "^12.0.0",
+    "fastify": "^4.28.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  }
+}
