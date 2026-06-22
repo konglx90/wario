@@ -182,6 +182,9 @@ program
   .option('--tags <tags>', 'comma-separated tags')
   .option('--source <source>', 'source system (e.g. claude-code, codex)')
   .option('--source-ref <ref>', 'source-system reference id')
+  .option('--repo-path <path>', 'git repo root for server-side OCR review (also reads WARIO_REPO_PATH env)', process.env.WARIO_REPO_PATH)
+  .option('--git-from <ref>', 'git base ref for OCR review (also reads WARIO_GIT_FROM env)', process.env.WARIO_GIT_FROM)
+  .option('--git-to <ref>', 'git head ref for OCR review (also reads WARIO_GIT_TO env)', process.env.WARIO_GIT_TO)
   .requiredOption('--session-id <id>', 'agent session id (also reads WARIO_SESSION_ID env)', process.env.WARIO_SESSION_ID)
   .option('--by <pushedBy>', 'pushed-by identifier', defaultActor())
   .action(async (opts: {
@@ -194,6 +197,9 @@ program
     tags?: string;
     source?: string;
     sourceRef?: string;
+    repoPath?: string;
+    gitFrom?: string;
+    gitTo?: string;
     sessionId: string;
     by: string;
   }) => {
@@ -209,6 +215,9 @@ program
       tags: opts.tags ? opts.tags.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
       source: opts.source,
       sourceRef: opts.sourceRef,
+      repoPath: opts.repoPath,
+      gitFrom: opts.gitFrom,
+      gitTo: opts.gitTo,
     };
     const review = await httpJson<ReviewRequest>(
       `${baseUrl()}/api/projects/${encodeURIComponent(opts.project)}/reviews`,

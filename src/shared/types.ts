@@ -2,7 +2,8 @@ export type RiskLevel = 'L1' | 'L2' | 'L3';
 export type Verdict = 'approve' | 'reject' | 'comment';
 export type ReviewStatus = 'pending' | 'decided';
 export type ContentType = 'requirement' | 'plan' | 'code';
-export type ReviewerKind = 'claude' | 'codex';
+export type ReviewerKind = 'claude' | 'codex' | 'ocr';
+export type PreReviewStatus = 'running' | 'succeeded' | 'failed' | 'timeout';
 
 export interface Project {
   id: string;
@@ -52,6 +53,9 @@ export interface ReviewContext {
   tags?: string[];
   source?: string;
   sourceRef?: string;
+  repoPath?: string;
+  gitFrom?: string;
+  gitTo?: string;
 }
 
 export interface ReviewRequest {
@@ -64,6 +68,10 @@ export interface ReviewRequest {
   contentType?: ContentType;
   status: ReviewStatus;
   preReview?: RiskReport;
+  ocrReview?: RiskReport;
+  attemptedReviewer?: ReviewerKind;
+  preReviewStatus?: PreReviewStatus;
+  ocrStatus?: PreReviewStatus;
   reviewSessionId?: string;
   decision?: ReviewDecision;
   createdAt: string;
@@ -80,6 +88,9 @@ export interface PushReviewInput {
   tags?: string[];
   source?: string;
   sourceRef?: string;
+  repoPath?: string;
+  gitFrom?: string;
+  gitTo?: string;
   selfAssessedRisk?: RiskLevel;
   contentType?: ContentType;
 }

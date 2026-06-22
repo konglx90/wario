@@ -4,9 +4,13 @@ import { detectProducer, pickReviewer } from '../src/prereview/router.js';
 import {
   parseRiskReport,
   parseClaudeOutput,
-  parseCodexOutput,
   runReviewerCli,
 } from '../src/prereview/runner.js';
+import {
+  parseOcrOutput,
+  mapOcrToRiskReport,
+  isOcrEnabled,
+} from '../src/prereview/ocr.js';
 import { buildPrompt } from '../src/prereview/prompts.js';
 
 // ============================================================
@@ -133,37 +137,9 @@ test('parseClaudeOutput: handles JSON without session_id', () => {
   assert.equal(parsed.sessionId, undefined);
 });
 
-test('parseCodexOutput: extracts thread_id and agent_message', () => {
-  const stdout = [
-    JSON.stringify({ type: 'thread.started', thread_id: 'thread-xyz' }),
-    JSON.stringify({ type: 'turn.started' }),
-    JSON.stringify({
-      type: 'item.completed',
-      item: { id: 'i1', type: 'agent_message', text: 'hello' },
-    }),
-    JSON.stringify({
-      type: 'item.completed',
-      item: { id: 'i2', type: 'agent_message', text: ' world' },
-    }),
-    JSON.stringify({ type: 'turn.completed' }),
-  ].join('\n');
-  const parsed = parseCodexOutput(stdout);
-  assert.equal(parsed.sessionId, 'thread-xyz');
-  assert.equal(parsed.modelText, 'hello world');
-});
-
-test('parseCodexOutput: empty stdout yields empty', () => {
-  const parsed = parseCodexOutput('');
-  assert.equal(parsed.modelText, '');
-  assert.equal(parsed.sessionId, undefined);
-});
-
-test('parseCodexOutput: ignores non-JSON lines', () => {
-  const stdout = 'not json\n' + JSON.stringify({ type: 'turn.started' }) + '\n';
-  const parsed = parseCodexOutput(stdout);
-  assert.equal(parsed.modelText, '');
-  assert.equal(parsed.sessionId, undefined);
-});
+// parseCodexOutput tests removed: the old `codex exec --json` path is gone,
+// replaced by codex-server.ts (app-server JSON-RPC). Text collection now
+// happens inside runCodexServer, no public parser to test.
 
 test('runReviewerCli: spawn failure rejected', async () => {
   await assert.rejects(
@@ -251,4 +227,126 @@ test('buildPrompt: every prompt asks for JSON output', () => {
     assert.match(p, /JSON/);
     assert.match(p, /riskLevel/);
   }
+});
+
+// ============================================================
+// OCR runner tests
+// ============================================================
+
+test('isOcrEnabled: false unless WARIO_OCR=enabled', () => {
+  const orig = process.env.WARIO_OCR;
+  delete process.env.WARIO_OCR;
+  assert.equal(isOcrEnabled(), false);
+  process.env.WARIO_OCR = 'true';
+  assert.equal(isOcrEnabled(), false);
+  process.env.WARIO_OCR = 'enabled';
+  assert.equal(isOcrEnabled(), true);
+  if (orig === undefined) delete process.env.WARIO_OCR;
+  else process.env.WARIO_OCR = orig;
+});
+
+test('parseOcrOutput: parses JSON object stdout', () => {
+  const stdout = JSON.stringify({
+    status: 'success',
+    comments: [
+      { path: 'src/a.ts', content: 'bug', start_line: 10, end_line: 12 },
+    ],
+  });
+  const parsed = parseOcrOutput(stdout);
+  assert.ok(parsed);
+  assert.equal(parsed.status, 'success');
+  assert.equal(parsed.comments.length, 1);
+});
+
+test('parseOcrOutput: extracts JSON from surrounding noise', () => {
+  const stdout = 'progress: 50%\n{"status":"success","comments":[]}\ndone';
+  const parsed = parseOcrOutput(stdout);
+  assert.ok(parsed);
+  assert.equal(parsed.status, 'success');
+});
+
+test('parseOcrOutput: returns undefined on garbage', () => {
+  assert.equal(parseOcrOutput(''), undefined);
+  assert.equal(parseOcrOutput('not json at all'), undefined);
+});
+
+test('mapOcrToRiskReport: maps comments to findings with location', () => {
+  const parsed = parseOcrOutput(
+    JSON.stringify({
+      status: 'success',
+      comments: [
+        {
+          path: 'src/auth.ts',
+          content: 'XSS risk in input handling',
+          suggestion_code: 'sanitize(input)',
+          start_line: 42,
+          end_line: 42,
+        },
+        {
+          path: 'src/util.ts',
+          content: 'unused import',
+          start_line: 1,
+          end_line: 3,
+        },
+      ],
+    })
+  );
+  assert.ok(parsed);
+  const report = mapOcrToRiskReport(parsed);
+  assert.equal(report.byAgent, 'ocr');
+  assert.equal(report.reviewSessionId, '');
+  assert.equal(report.findings.length, 2);
+  assert.equal(report.findings[0].severity, 'medium');
+  assert.equal(report.findings[0].category, 'ocr');
+  assert.equal(report.findings[0].location, 'src/auth.ts:42');
+  assert.equal(report.findings[0].suggestion, 'sanitize(input)');
+  assert.equal(report.findings[1].location, 'src/util.ts:1-3');
+  assert.match(report.summary, /2 comments across 2 files/);
+});
+
+test('mapOcrToRiskReport: derives riskLevel by finding count', () => {
+  const mk = (n: number) =>
+    mapOcrToRiskReport({
+      status: 'success',
+      comments: Array.from({ length: n }, (_, i) => ({
+        path: `f${i}.ts`,
+        content: 'x',
+        start_line: 1,
+        end_line: 1,
+      })),
+    });
+  assert.equal(mk(0).riskLevel, 'L1');
+  assert.equal(mk(1).riskLevel, 'L2');
+  assert.equal(mk(2).riskLevel, 'L2');
+  assert.equal(mk(3).riskLevel, 'L3');
+  assert.equal(mk(10).riskLevel, 'L3');
+});
+
+test('mapOcrToRiskReport: skips comments without content', () => {
+  const report = mapOcrToRiskReport({
+    status: 'success',
+    comments: [
+      { path: 'a.ts', content: 'real finding', start_line: 1, end_line: 1 },
+      { path: 'b.ts' },
+      { path: 'c.ts', content: '' },
+    ],
+  });
+  assert.equal(report.findings.length, 1);
+  assert.equal(report.findings[0].location, 'a.ts:1');
+});
+
+test('mapOcrToRiskReport: location omitted when no path/lines', () => {
+  const report = mapOcrToRiskReport({
+    status: 'success',
+    comments: [{ content: 'general note' }],
+  });
+  assert.equal(report.findings.length, 1);
+  assert.equal(report.findings[0].location, undefined);
+});
+
+test('mapOcrToRiskReport: handles empty comments', () => {
+  const report = mapOcrToRiskReport({ status: 'success', comments: [] });
+  assert.equal(report.findings.length, 0);
+  assert.equal(report.riskLevel, 'L1');
+  assert.match(report.summary, /0 comments across 0 files/);
 });

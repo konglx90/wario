@@ -22,12 +22,16 @@ node bin/wario.js config # 打印生效配置
 ## Agent 自动化核心:wait 协议
 Agent 推完 review 后 **必须 wait**,否则拿不到决策:
 ```bash
-wario push --title "..." --risk L2 --tags ui,frontend --source claude-code --session-id sess-123
+wario push --title "..." --risk L2 --tags ui,frontend --source claude-code --session-id sess-123 \
+  --content-type code \
+  --repo-path "$(pwd)" --git-from main --git-to HEAD
 wario wait <reviewId> --timeout 600   # 阻塞直到人类决策
 # 输出 JSON: { verdict, comment, reviewer, decidedAt, ... }
 # Agent 读到 verdict 后继续(merge / fix / 通知)
 ```
 HTTP 等价:`GET /api/reviews/:id?wait=N&interval=1000`(超时返回 408)。
+
+`--repo-path`/`--git-from`/`--git-to` 三件套只在 code 类 review + `WARIO_OCR=enabled` 时触发服务端并行跑 Alibaba OCR 作为对比评审,结果存 `review.ocrReview`,Dashboard 与异构 agent review 并排展示。三字段不持久化,只在 push 那一刻的内存对象上用;缺任一字段则跳过 OCR,不影响异构 agent review。
 
 ## 技术栈
 - Node 22+ / TypeScript(ESM, strict)
@@ -68,6 +72,11 @@ HTTP 等价:`GET /api/reviews/:id?wait=N&interval=1000`(超时返回 408)。
 - **pre-review**:push 后 fire-and-forget 跑异构 Agent 预审(默认开),结果存 `review_requests.pre_review`
   - claude producer → codex reviewer;codex producer → claude reviewer;其他 → `WARIO_DEFAULT_REVIEWER`(默认 claude)
   - 关闭:`WARIO_PREREVIEW=disabled`;超时:`WARIO_PREREVIEW_TIMEOUT`(秒,默认 120)
+- **OCR 对比评审**:`WARIO_OCR=enabled` 时,push code 类 review 且带 `repoPath`/`gitFrom`/`gitTo` 三字段,并行跑 Alibaba `ocr review --format json --audience agent`,结果存 `review_requests.ocr_review`,Dashboard 与异构 agent review 并排展示
+  - 三字段不持久化,只在 push 那一刻的内存对象上用;缺任一字段或 contentType≠code 则跳过
+  - OCR 无 severity/riskLevel,wario 派生:severity 全标 medium,riskLevel 按 findings 数(0=L1, 1-2=L2, 3+=L3)
+  - 命令覆盖:`WARIO_OCR_CMD`(默认 `ocr`);超时:`WARIO_OCR_TIMEOUT`(秒,默认 300);模型:`WARIO_OCR_MODEL`
+  - 失败(超时/退出码非 0/不可解析)静默 warn,不影响异构 agent review
 - **diff 从 stdin 读**(默认)避免 shell 转义;`--diff <path>` 走文件
 - **contentType**:`requirement` / `plan` / `code`(默认),决定 prompt 模板
 - **端口 7331**(`WARIO_PORT` 覆盖);**base url** 走 `WARIO_BASE_URL`(默认 `http://127.0.0.1:7331`)

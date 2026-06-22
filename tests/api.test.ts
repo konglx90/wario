@@ -341,6 +341,34 @@ test('POST /api/projects/:slug/reviews requires sessionId', async () => {
   }
 });
 
+test('POST /api/projects/:slug/reviews accepts repoPath/gitFrom/gitTo', async () => {
+  const s = setup();
+  try {
+    await s.app.inject({ method: 'POST', url: '/api/projects', payload: { slug: 'foo' } });
+    const res = await s.app.inject({
+      method: 'POST',
+      url: '/api/projects/foo/reviews',
+      payload: {
+        title: 'feature X',
+        pushedBy: 'claude-code',
+        sessionId: 'sess-git',
+        contentType: 'code',
+        repoPath: '/tmp/repo',
+        gitFrom: 'main',
+        gitTo: 'HEAD',
+      },
+    });
+    assert.equal(res.statusCode, 201);
+    const body = res.json();
+    assert.equal(body.context.repoPath, '/tmp/repo');
+    assert.equal(body.context.gitFrom, 'main');
+    assert.equal(body.context.gitTo, 'HEAD');
+    assert.equal(body.ocrReview, undefined);
+  } finally {
+    await cleanup(s);
+  }
+});
+
 test('POST /api/reviews/:id/resume returns 404 for unknown id', async () => {
   const s = setup();
   try {

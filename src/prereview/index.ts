@@ -1,19 +1,23 @@
 import type Database from 'better-sqlite3';
-import type { ReviewRequest, RiskReport, ReviewerKind } from '../shared/types.js';
+import type { ReviewRequest, RiskReport } from '../shared/types.js';
 import { detectProducer, pickReviewer } from './router.js';
 import { buildPrompt } from './prompts.js';
 import { parseRiskReport, runReviewerCli } from './runner.js';
+import { runOcrReview, isOcrEnabled } from './ocr.js';
 import { ReviewNotFoundError } from '../domain/review.js';
 
 export { ReviewNotFoundError };
+export { runOcrReview, isOcrEnabled };
 
-const REVIEWER_CMDS: Record<ReviewerKind, string> = {
+type SpawnReviewer = 'claude' | 'codex';
+
+const REVIEWER_CMDS: Record<SpawnReviewer, string> = {
   claude: process.env.WARIO_CLAUDE_CMD ?? 'claude',
   codex: process.env.WARIO_CODEX_CMD ?? 'codex',
 };
 
-const DEFAULT_REVIEWER: ReviewerKind =
-  (process.env.WARIO_DEFAULT_REVIEWER as ReviewerKind) ?? 'claude';
+const DEFAULT_REVIEWER: SpawnReviewer =
+  (process.env.WARIO_DEFAULT_REVIEWER as SpawnReviewer) ?? 'claude';
 
 const TIMEOUT_MS = parseInt(process.env.WARIO_PREREVIEW_TIMEOUT ?? '120', 10) * 1000;
 
@@ -21,7 +25,7 @@ export function isPrereviewEnabled(): boolean {
   return process.env.WARIO_PREREVIEW !== 'disabled';
 }
 
-function resolveReviewer(producer: ReturnType<typeof detectProducer>): ReviewerKind {
+function resolveReviewer(producer: ReturnType<typeof detectProducer>): SpawnReviewer {
   const routing = pickReviewer(producer, DEFAULT_REVIEWER);
   if (routing.reviewer === 'default') return DEFAULT_REVIEWER;
   return routing.reviewer;
@@ -41,9 +45,14 @@ export async function runPreReview(
   db: Database.Database,
   review: ReviewRequest
 ): Promise<void> {
+  let reviewer: 'claude' | 'codex' | undefined;
   try {
     const producer = detectProducer(review.context.source, review.pushedBy);
-    const reviewer = resolveReviewer(producer);
+    reviewer = resolveReviewer(producer);
+    db.prepare(
+      `UPDATE review_requests SET attempted_reviewer = ?, prereview_status = 'running' WHERE id = ?`
+    ).run(reviewer, review.id);
+
     const { command, baseArgs } = splitCommand(REVIEWER_CMDS[reviewer]);
 
     const prompt = buildPrompt({
@@ -67,6 +76,9 @@ export async function runPreReview(
     );
 
     if (result.timedOut) {
+      db.prepare(
+        `UPDATE review_requests SET prereview_status = 'timeout' WHERE id = ?`
+      ).run(review.id);
       console.warn(
         `[prereview] ${command} timed out after ${TIMEOUT_MS}ms for ${review.id}`
       );
@@ -74,6 +86,9 @@ export async function runPreReview(
     }
 
     if (result.exitCode !== 0) {
+      db.prepare(
+        `UPDATE review_requests SET prereview_status = 'failed' WHERE id = ?`
+      ).run(review.id);
       console.warn(
         `[prereview] ${command} exited ${result.exitCode} for ${review.id}: ${result.stderr.slice(0, 200)}`
       );
@@ -82,6 +97,9 @@ export async function runPreReview(
 
     const report = parseRiskReport(result.modelText);
     if (!report) {
+      db.prepare(
+        `UPDATE review_requests SET prereview_status = 'failed' WHERE id = ?`
+      ).run(review.id);
       console.warn(
         `[prereview] ${command} output not parseable for ${review.id} (modelText: ${result.modelText.slice(0, 200)})`
       );
@@ -96,7 +114,7 @@ export async function runPreReview(
     };
 
     db.prepare(
-      `UPDATE review_requests SET pre_review = ?, review_session_id = ? WHERE id = ?`
+      `UPDATE review_requests SET pre_review = ?, review_session_id = ?, prereview_status = 'succeeded' WHERE id = ?`
     ).run(JSON.stringify(finalReport), finalReport.reviewSessionId, review.id);
 
     console.log(
@@ -104,6 +122,9 @@ export async function runPreReview(
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    db.prepare(
+      `UPDATE review_requests SET prereview_status = 'failed' WHERE id = ?`
+    ).run(review.id);
     console.warn(`[prereview] unexpected error for ${review.id}: ${msg}`);
   }
 }
@@ -134,11 +155,14 @@ export async function resumeReview(
   }
 
   const reviewer = existing.byAgent;
+  if (reviewer !== 'claude' && reviewer !== 'codex') {
+    throw new NoReviewSessionError(reviewId);
+  }
   const { command, baseArgs } = splitCommand(REVIEWER_CMDS[reviewer]);
 
   const result = await runReviewerCli(
     reviewer,
-    { command, baseArgs: [...baseArgs, 'resume'], timeoutMs: TIMEOUT_MS },
+    { command, baseArgs, timeoutMs: TIMEOUT_MS, resumeSessionId: sessionId },
     question
   );
 

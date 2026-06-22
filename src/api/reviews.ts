@@ -15,6 +15,8 @@ import type { PushReviewInput, ReviewStatus, Verdict } from '../shared/types.js'
 import {
   isPrereviewEnabled,
   runPreReview,
+  runOcrReview,
+  isOcrEnabled,
   resumeReview,
   NoReviewSessionError,
 } from '../prereview/index.js';
@@ -61,6 +63,9 @@ export function registerReviewRoutes(
         tags: body.tags,
         source: body.source,
         sourceRef: body.sourceRef,
+        repoPath: body.repoPath,
+        gitFrom: body.gitFrom,
+        gitTo: body.gitTo,
         selfAssessedRisk: body.selfAssessedRisk,
         contentType: body.contentType,
       };
@@ -69,6 +74,10 @@ export function registerReviewRoutes(
 
         if (isPrereviewEnabled()) {
           void runPreReview(db, review);
+        }
+
+        if (isOcrEnabled()) {
+          void runOcrReview(db, review);
         }
 
         return reply.code(201).send(review);

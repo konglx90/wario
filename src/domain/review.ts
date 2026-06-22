@@ -29,6 +29,10 @@ interface ReviewRow {
   status: string;
   decision: string | null;
   pre_review: string | null;
+  ocr_review: string | null;
+  attempted_reviewer: string | null;
+  prereview_status: string | null;
+  ocr_status: string | null;
   review_session_id: string | null;
   created_at: string;
   decided_at: string | null;
@@ -53,6 +57,10 @@ function rowToReview(row: ReviewRow): ReviewRequest {
     status: row.status as ReviewStatus,
     decision: row.decision ? (JSON.parse(row.decision) as ReviewDecision) : undefined,
     preReview: row.pre_review ? (JSON.parse(row.pre_review) as RiskReport) : undefined,
+    ocrReview: row.ocr_review ? (JSON.parse(row.ocr_review) as RiskReport) : undefined,
+    attemptedReviewer: (row.attempted_reviewer as ReviewRequest['attemptedReviewer'] | null) ?? undefined,
+    preReviewStatus: (row.prereview_status as ReviewRequest['preReviewStatus'] | null) ?? undefined,
+    ocrStatus: (row.ocr_status as ReviewRequest['ocrStatus'] | null) ?? undefined,
     reviewSessionId: row.review_session_id ?? undefined,
     createdAt: row.created_at,
     decidedAt: row.decided_at ?? undefined,
@@ -124,6 +132,9 @@ export function pushReview(
       tags: input.tags,
       source: input.source,
       sourceRef: input.sourceRef,
+      repoPath: input.repoPath,
+      gitFrom: input.gitFrom,
+      gitTo: input.gitTo,
     },
     selfAssessedRisk: input.selfAssessedRisk,
     contentType: input.contentType,

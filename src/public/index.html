@@ -98,8 +98,12 @@
       return `<div class="mt-2">${items}</div>`;
     }
 
-    function renderPreReview(pr) {
+    function renderReport(pr, opts) {
       if (!pr) return '';
+      const label = opts?.label ?? 'Review Agent';
+      const accentBg = opts?.accentBg ?? 'bg-purple-50';
+      const accentBorder = opts?.accentBorder ?? 'border-purple-100';
+      const accentText = opts?.accentText ?? 'text-purple-700';
       const findings = (pr.findings || []).map(f => `
         <div class="text-sm mt-1 flex gap-2 items-start">
           <span class="inline-block text-xs px-1.5 py-0.5 rounded ${severityClass(f.severity)} shrink-0">${escapeHtml(f.severity)}</span>
@@ -114,9 +118,9 @@
         ? `<span class="text-xs text-gray-400 font-mono">session: ${escapeHtml(shortId(pr.reviewSessionId, 12))}</span>`
         : '';
       return `
-        <details class="mt-2 bg-purple-50 border border-purple-100 rounded p-2" open>
-          <summary class="text-xs text-purple-700 cursor-pointer">
-            <span class="font-semibold">Review Agent</span>
+        <details class="mt-2 ${accentBg} border ${accentBorder} rounded p-2" open>
+          <summary class="text-xs ${accentText} cursor-pointer">
+            <span class="font-semibold">${escapeHtml(label)}</span>
             <span class="font-mono">${escapeHtml(pr.byAgent)}</span>
             · risk <span class="px-1 rounded ${riskClass(pr.riskLevel)}">${escapeHtml(pr.riskLevel)}</span>
             <span class="text-gray-600"> — ${escapeHtml(pr.summary)}</span>
@@ -126,6 +130,24 @@
           ${renderResumeRounds(pr.resumeRounds)}
         </details>
       `;
+    }
+
+    function renderPreReview(pr) {
+      return renderReport(pr, {
+        label: 'Review Agent',
+        accentBg: 'bg-purple-50',
+        accentBorder: 'border-purple-100',
+        accentText: 'text-purple-700',
+      });
+    }
+
+    function renderOcrReview(pr) {
+      return renderReport(pr, {
+        label: 'OCR (Alibaba)',
+        accentBg: 'bg-amber-50',
+        accentBorder: 'border-amber-200',
+        accentText: 'text-amber-700',
+      });
     }
 
     function renderReview(r, isPending) {
@@ -154,6 +176,23 @@
         ? `<span class="text-xs text-gray-400">· ${escapeHtml(r.context.source)}${r.context.sourceRef ? `:${escapeHtml(r.context.sourceRef)}` : ''}</span>`
         : '';
 
+      function statusClass(s) {
+        if (s === 'succeeded') return 'bg-green-100 text-green-700';
+        if (s === 'running') return 'bg-blue-100 text-blue-700';
+        if (s === 'failed') return 'bg-red-100 text-red-700';
+        if (s === 'timeout') return 'bg-amber-100 text-amber-700';
+        return 'bg-gray-100 text-gray-500';
+      }
+      function reviewerBadge(kind, status) {
+        if (!kind && !status) return '';
+        const label = kind ? `reviewer: ${escapeHtml(kind)}` : 'reviewer: —';
+        const st = status ? ` <span class="px-1 rounded ${statusClass(status)}">${escapeHtml(status)}</span>` : '';
+        return `<span class="text-xs text-gray-500 bg-gray-50 px-1.5 py-0.5 rounded">${label}${st}</span>`;
+      }
+      const reviewerLine = (r.attemptedReviewer || r.preReviewStatus || r.ocrStatus)
+        ? `<div class="mt-1 flex gap-1 flex-wrap">${reviewerBadge(r.attemptedReviewer, r.preReviewStatus)}${reviewerBadge(r.ocrStatus ? 'ocr' : null, r.ocrStatus)}</div>`
+        : '';
+
       return `
         <div class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
           <div class="flex items-start gap-3">
@@ -168,8 +207,10 @@
               </div>
               <h3 class="font-medium mt-1">${escapeHtml(r.context.title)}</h3>
               ${r.context.description ? `<p class="text-sm text-gray-600 mt-1 whitespace-pre-wrap">${escapeHtml(r.context.description)}</p>` : ''}
+              ${reviewerLine}
               ${tags ? `<div class="mt-2">${tags}</div>` : ''}
               ${renderPreReview(r.preReview)}
+              ${renderOcrReview(r.ocrReview)}
               ${decisionComment}
             </div>
             <div class="flex flex-col gap-2 items-end">${actions}</div>

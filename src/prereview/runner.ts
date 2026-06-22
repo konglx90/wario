@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { RiskReport, RiskFinding, ReviewerKind } from '../shared/types.js';
+import { runCodexServer } from './codex-server.js';
 
 export interface RunnerConfig {
   command: string;
@@ -7,6 +8,7 @@ export interface RunnerConfig {
   timeoutMs: number;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  resumeSessionId?: string;
 }
 
 export interface RunnerResult {
@@ -26,7 +28,17 @@ export function runReviewerCli(
   if (kind === 'claude') {
     return runClaude(config, prompt);
   }
-  return runCodex(config, prompt);
+  if (kind === 'codex') {
+    return runCodexServer(prompt, {
+      command: config.command,
+      baseArgs: config.baseArgs,
+      cwd: config.cwd,
+      env: config.env,
+      timeoutMs: config.timeoutMs,
+      resumeSessionId: config.resumeSessionId,
+    });
+  }
+  return Promise.reject(new Error(`unsupported reviewer kind: ${kind}`));
 }
 
 function runClaude(config: RunnerConfig, prompt: string): Promise<RunnerResult> {
@@ -92,76 +104,17 @@ export function parseClaudeOutput(stdout: string): {
   }
 }
 
-function runCodex(config: RunnerConfig, prompt: string): Promise<RunnerResult> {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    let timedOut = false;
-    const args = [...config.baseArgs, 'exec', '--json', '--skip-git-repo-check', prompt];
-    const child = spawn(config.command, args, {
-      cwd: config.cwd,
-      env: { ...process.env, ...config.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-    }, config.timeoutMs);
-
-    child.stdout.on('data', (d) => {
-      stdout += d.toString();
-    });
-    child.stderr.on('data', (d) => {
-      stderr += d.toString();
-    });
-
-    child.on('error', (e) => {
-      clearTimeout(timer);
-      reject(e);
-    });
-
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      const parsed = parseCodexOutput(stdout);
-      resolve({
-        modelText: parsed.modelText,
-        sessionId: parsed.sessionId,
-        stderr,
-        exitCode: code ?? -1,
-        durationMs: Date.now() - start,
-        timedOut,
-      });
-    });
-  });
+function runCodex(_config: RunnerConfig, _prompt: string): Promise<RunnerResult> {
+  return Promise.reject(
+    new Error('runCodex is deprecated; use runCodexServer via runReviewerCli')
+  );
 }
 
-export function parseCodexOutput(stdout: string): {
+export function parseCodexOutput(_stdout: string): {
   modelText: string;
   sessionId?: string;
 } {
-  const lines = stdout.split('\n').filter(Boolean);
-  let modelText = '';
-  let sessionId: string | undefined;
-  for (const line of lines) {
-    let evt: Record<string, unknown>;
-    try {
-      evt = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (evt.type === 'thread.started' && typeof evt.thread_id === 'string') {
-      sessionId = evt.thread_id;
-    } else if (evt.type === 'item.completed') {
-      const item = (evt.item as Record<string, unknown> | undefined) ?? {};
-      if (item.type === 'agent_message' && typeof item.text === 'string') {
-        modelText += item.text;
-      }
-    }
-  }
-  return { modelText, sessionId };
+  return { modelText: '' };
 }
 
 const VALID_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);

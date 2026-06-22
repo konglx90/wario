@@ -102,4 +102,35 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    id: 5,
+    name: 'add_ocr_review',
+    up: (db) => {
+      const cols = db
+        .prepare("PRAGMA table_info(review_requests)")
+        .all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'ocr_review')) {
+        db.exec('ALTER TABLE review_requests ADD COLUMN ocr_review TEXT');
+      }
+    },
+  },
+  {
+    id: 6,
+    name: 'add_prereview_status',
+    up: (db) => {
+      const cols = db
+        .prepare("PRAGMA table_info(review_requests)")
+        .all() as Array<{ name: string }>;
+      const colNames = new Set(cols.map((c) => c.name));
+      if (!colNames.has('attempted_reviewer')) {
+        db.exec('ALTER TABLE review_requests ADD COLUMN attempted_reviewer TEXT');
+      }
+      if (!colNames.has('prereview_status')) {
+        db.exec('ALTER TABLE review_requests ADD COLUMN prereview_status TEXT');
+      }
+      if (!colNames.has('ocr_status')) {
+        db.exec('ALTER TABLE review_requests ADD COLUMN ocr_status TEXT');
+      }
+    },
+  },
 ];
