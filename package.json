@@ -29,5 +29,6 @@
   ],
   "engines": {
     "node": ">=22"
-  }
+  },
+  "repository": "git@github.com:konglx90/wario.git"
 }

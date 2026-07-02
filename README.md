@@ -20,11 +20,12 @@ git diff HEAD~1 | wario push --title "登录页 UI 还原" --risk L2 \
 # → codex 评审完就退出,不等人类
 
 # 人类侧:看异构 Agent 的评审报告
-wario show rv_xxx --pretty        # 读 codex 的 findings
+wario show rv_xxx --pretty        # 读 codex 的 findings + reviewSessionId
 
-# 人类有疑问?resume 评审 Agent 继续交互
-claude --resume <review-session-id>   # 或 codex --resume,看原 reviewer 是谁
-# → 评审 Agent 在原上下文里回答,补充 findings
+# 人类有疑问?resume 评审 Agent 继续交互(Wario 编排,findings 回写 DB)
+wario review resume rv_xxx --question "第 2 条 finding 的 XSS 怎么触发?"
+# → Wario spawn `codex exec resume <reviewSessionId>` 喂问题
+# → 评审 Agent 在原上下文回答,append 到 preReview.resumeRounds
 
 # 人类最终拍板
 wario decide rv_xxx --verdict approve --reviewer alice
@@ -35,13 +36,13 @@ wario wait rv_xxx --timeout 600   # 阻塞等决策(人类不 decide 就一直�
 ```
 
 **核心模式**:
-1. **生产 Agent push** → **long-poll 等决策**(不返回,直到人类 decide)
-2. **异构 Agent 评审**(claude 写的 codex 评 / codex 写的 claude 评)→ 评审完就退出
-3. **人类看报告**,有疑问 → **`--resume` 评审 Agent** 让它在原上下文里继续交互(追问、解释、补充 findings)
+1. **生产 Agent push**(**sessionId 必填**)→ **long-poll 等决策**(不返回,直到人类 decide)
+2. **异构 Agent 评审**(claude 写的 codex 评 / codex 写的 claude 评)→ 评审完就退出,Wario 捕获 session ID 存 DB
+3. **人类看报告**,有疑问 → **`wario review resume`** 让 Wario spawn `claude --resume <sid>` / `codex exec resume <sid>`,回答 append 到 `preReview.resumeRounds`
 4. **人类拍板** decide(approve / reject / comment)
 5. **生产 Agent long-poll 返回** → 在原 session 里拿决策继续干
 
-人类**不直接读 diff 找问题**,而是**审异构 Agent 的评审报告** —— 批量、聚焦、按 risk 分级。有疑问不用自己琢磨,直接 `--resume` 评审 Agent 问它。
+人类**不直接读 diff 找问题**,而是**审异构 Agent 的评审报告** —— 批量、聚焦、按 risk 分级。有疑问不用自己琢磨,直接 `wario review resume` 问评审 Agent。
 
 ---
 
@@ -216,6 +217,7 @@ wario wait rv_xxx --timeout 600
 | `wario show <id> [--pretty]` | 看 review 详情(含异构评审报告) |
 | `wario wait <id> --timeout <sec>` | 阻塞等决策(long-poll) |
 | `wario decide <id> --verdict approve\|reject\|comment [--comment <c>] [--reviewer <name>]` | 决策 |
+| `wario review resume <id> --question <q>` | resume 评审 Agent 问问题,findings 回写 DB |
 
 ### `wario push` 参数
 
@@ -230,7 +232,7 @@ wario wait rv_xxx --timeout 600
 | `--tags <t1,t2>` | — | 逗号分隔 |
 | `--source <name>` | — | 来源系统(claude-code / codex / ...)。**决定异构评审路由** |
 | `--source-ref <ref>` | — | 来源系统的关联 ID |
-| `--session-id <id>` | — | Agent 会话 ID,Dashboard 按此分组。也读 `WARIO_SESSION_ID` 环境变量 |
+| `--session-id <id>` | ✅ | Agent 会话 ID(必填),Dashboard 按此分组。也读 `WARIO_SESSION_ID` 环境变量 |
 | `--by <pushedBy>` | — | 推送者标识,默认 `$USER` |
 
 ---
@@ -249,6 +251,7 @@ wario wait rv_xxx --timeout 600
 | GET | `/api/projects/:slug/reviews?status=&limit=` | list review |
 | GET | `/api/reviews/:id[?wait=N&interval=ms]` | show / long-poll |
 | POST | `/api/reviews/:id/decide` | decide |
+| POST | `/api/reviews/:id/resume` | resume 评审 Agent,findings 回写 |
 | GET | `/` | Dashboard HTML |
 
 ### push 示例
@@ -344,10 +347,27 @@ curl "http://127.0.0.1:7331/api/reviews/rv_xxx?wait=60&interval=1000"
 ### 触发机制
 
 - push 后 **fire-and-forget** 触发,不阻塞 push 返回
-- 走 `child_process.spawn`,prompt 通过 stdin 喂给 Agent CLI
+- claude 走 `claude -p --output-format json <prompt>`,解析单 JSON 输出取 `result` + `session_id`
+- codex 走 `codex exec --json --skip-git-repo-check <prompt>`,解析 JSONL 取 `thread_id` + `agent_message.text`
+- 评审 Agent 的 session ID 存 DB `review_session_id` 列 + `preReview.reviewSessionId` 字段
 - 超时 `SIGTERM` 杀子进程(默认 120 秒)
 - 评审失败不阻塞 review(只打 warn 日志,`preReview` 字段保持空,人类直接看 diff)
 - 输出无法解析时不写 `preReview`,人类降级为直接看 diff
+
+### 人类 resume 评审 Agent
+
+```bash
+wario review resume <reviewId> --question "..."
+```
+
+Wario 内部:
+1. 从 DB 读 `preReview.reviewSessionId` + `preReview.byAgent`
+2. spawn `claude --resume <sid>` 或 `codex exec resume <sid>`,把 question 作为 prompt 喂进去
+3. 解析输出,构造 `ResumeRound { question, answer, findings?, at }`
+4. append 到 `preReview.resumeRounds` 数组,UPDATE DB
+5. 返回更新后的 review
+
+如果 review 不存在 → 404;没有 `preReview`(评审 Agent 没跑或失败)→ 409。
 
 ### 关闭异构评审
 
@@ -406,7 +426,9 @@ WARIO_PREREVIEW=disabled wario serve
 - 项目下拉切换
 - 按 sessionId 分组展示(同会话的多次 push 折叠在一起)
 - 每行显示:Agent 自评 risk、**异构 Agent 评的 riskLevel**、findings 数量、age、tags
-- 异构评审报告可折叠(byAgent、summary、findings 列表)
+- 异构评审报告可折叠(byAgent、reviewSessionId、summary、findings 列表)
+- "追问 Reviewer" 按钮 → prompt 输入 question → 调 `POST /api/reviews/:id/resume` → 刷新
+- resumeRounds 历史可折叠(每轮 question + answer + 补充 findings)
 - 行内 approve / reject 按钮
 - 每 5 秒自动刷新
 
@@ -431,11 +453,10 @@ updated_at TEXT NOT NULL
 id TEXT PRIMARY KEY                  -- rv_<uuid>
 project_id TEXT NOT NULL             -- FK → projects.id
 pushed_by TEXT NOT NULL
-session_id TEXT                      -- Agent 会话 ID
+session_id TEXT NOT NULL             -- 生产 Agent 会话 ID(必填,连接键)
 title TEXT NOT NULL
 description TEXT
 diff TEXT
-artifacts TEXT                       -- JSON array
 tags TEXT                            -- JSON array
 source TEXT
 source_ref TEXT
@@ -443,14 +464,15 @@ self_assessed_risk TEXT              -- L1 | L2 | L3 (Agent 自评)
 content_type TEXT                    -- requirement | plan | code
 status TEXT NOT NULL DEFAULT 'pending'  -- pending | decided
 pre_review TEXT                      -- JSON RiskReport(异构 Agent 评审)
+review_session_id TEXT               -- 评审 Agent 的 session ID(用于 resume)
 decision TEXT                        -- JSON ReviewDecision
 created_at TEXT NOT NULL
 decided_at TEXT
 
 CREATE INDEX idx_review_requests_project_status ON review_requests(project_id, status);
 CREATE INDEX idx_review_requests_created_at ON review_requests(created_at);
-CREATE INDEX idx_review_requests_self_assessed_risk ON review_requests(self_assessed_risk);
 CREATE INDEX idx_review_requests_session_id ON review_requests(session_id);
+CREATE INDEX idx_review_requests_review_session_id ON review_requests(review_session_id);
 ```
 
 ---
@@ -524,16 +546,18 @@ Wario 的异构评审 prompt 借鉴了 rotom E2ED 的思路(结构化 verdict JS
 ## 已实现 vs 规划
 
 ### v1 已实现
-- ✅ CLI: `init / serve / home / config / project / push / list / show / wait / decide`
-- ✅ Fastify HTTP server + 9 个 REST 端点
-- ✅ SQLite 表 + 3 个 migration
+- ✅ CLI: `init / serve / home / config / project / push / list / show / wait / decide / review resume`
+- ✅ Fastify HTTP server + 10 个 REST 端点(含 resume)
+- ✅ SQLite 表 + 4 个 migration(含 review_session_id 列 + 删 artifacts)
 - ✅ 无鉴权(仅绑 loopback)
-- ✅ 单页 HTML Dashboard(列表 + 行内决策 + session 分组 + 评审报告折叠)
+- ✅ 单页 HTML Dashboard(列表 + 行内决策 + session 分组 + 评审报告折叠 + 追问按钮 + resume 历史)
 - ✅ **异构 Agent 评审**(claude ↔ codex,fallback 同构)— 主流程
+- ✅ 评审 Agent session ID 捕获(claude `--output-format json` / codex `--json` 输出解析)
+- ✅ `wario review resume` 编排:spawn `claude --resume` / `codex exec resume`,findings 回写 DB
 - ✅ 三种 contentType(requirement / plan / code)
-- ✅ sessionId 跟踪
+- ✅ 生产 Agent sessionId 必填(连接键 + Dashboard 分组)
 - ✅ `~/.wario/` 运行时目录
-- ✅ 54 个测试用例全绿
+- ✅ 67 个测试用例全绿
 
 ### v1.1+ 规划
 - `batch` 批量 decide CLI + Dashboard 多选("一键批所有 L1 + 无 findings")
